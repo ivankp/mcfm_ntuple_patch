@@ -1,0 +1,262 @@
+\documentclass[12pt]{article}
+% \usepackage[letterpaper, margin=0.65in]{geometry}
+
+\setlength{\hoffset}{-0.75in}
+\setlength{\voffset}{-1in}
+\setlength{\textwidth}{7in}%{426pt}
+\setlength{\textheight}{674pt}
+\renewcommand{\baselinestretch}{1.2}
+\setlength{\parskip}{0.05in}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T2A]{fontenc}
+
+\usepackage{indentfirst,amsmath,amssymb}
+\usepackage{perpage}
+\usepackage{footnote}
+\MakePerPage{footnote}
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+\renewcommand{\thefootnote}{\ifcase\value{footnote}
+\or*\or**\or***\or\#\or\#\#\or\#\#\#\or$\infty$\fi}
+
+\usepackage{xcolor}
+\definecolor{link}{HTML}{820E0E}
+
+\usepackage{minted}
+
+% \usepackage[
+%   backend=biber,
+%   sorting=none,
+%   % backref=true,
+%   giveninits=true,
+%   style=numeric-comp
+% ]{biblatex}
+% \addbibresource{refs.bib}
+
+\title{MCFM ntuple patch}
+\author{Ivan Pogrebnyak, MSU}
+\date{\today}
+
+\usepackage[
+  hyperfootnotes=false,
+  linktoc=all,
+  colorlinks=true,
+  linkcolor=link,
+  citecolor=link,
+  urlcolor=blue,
+  pdfauthor={Ivan Pogrebnyak},
+  pdftitle={MCFM ntuple patch},
+  pdfkeywords={MCFM, Monte Carlo}
+]{hyperref}
+
+\begin{document}
+\maketitle
+\sloppy % no bleading into the margin
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Introduction}
+
+The ability to save events, produced using a Monte Carlo generator, provides
+much greater flexibility in comparison to saving specific histograms internally
+populated by the events.
+Saving ntuples of generated events allows to adjust cuts, add new histograms,
+or change binning of already defined histograms without the need to rerun the
+event generator.
+Ntuples also allow users to utilize analysis software independent from the MC
+generator program.
+Having an intermediate format for event output allows for
+analysis code to be written in any desired programming language.
+Consequently, more analysis code, in whole or in part, may be reused from
+previous studies.
+
+Unfortunately, \texttt{MCFM} has been difficult to setup for ntuple output, and
+the newer versions\footnote{
+  \href{http://dx.doi.org/10.1007/jhep12(2019)034}{10.1007/JHEP12(2019)034},
+  arXiv: \href{https://arxiv.org/abs/1909.09117}{1909.09117}.
+} saw the feature removed entirely.
+Here, I present an easy patch, that can be applied to any \texttt{MCFM}
+version, to allow outputting ntuples.
+As it is listed here, the code allows to write ntuples in
+\texttt{ROOT}\footnote{
+  \href{https://doi.org/10.1016/j.cpc.2009.08.005}{10.1016/j.cpc.2009.08.005},
+  \url{http://root.cern.ch/}.
+} format.
+But any other format can be added with a few lines of code, as the patch
+provides a generic API.
+
+The main feature of the patch is the decoupling of the code that formats and
+writes the ntuples from its interface.
+This is achieved by compiling the writing code into a shared library,
+containing functions with specific signatures, which comprise the API.
+The shared library is dynamically loaded using \texttt{libdl},
+the standard Linux dynamic linking library.
+The shared library can be independently recompiled, if changes need to be made
+to the ntuple writing code or its dependencies, such as the installed version
+of \texttt{ROOT}, have changed.
+The output format can also be changed without recompiling \texttt{MCFM}.
+
+\clearpage
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Code structure}
+
+The API functions have the following equivalent \texttt{C} declarations:
+\begin{minted}{c}
+  void* open_ntuple(const char* file_name)
+  void close_ntuple(void* ntuple)
+  void fill_ntuple(void* ntuple)
+  void add_ntuple_branch_double(void* ntuple, const char* name, double* ptr)
+  void add_ntuple_branch_float(void* ntuple, const char* name, float* ptr)
+  void add_ntuple_branch_int(void* ntuple, const char* name, int* ptr)
+\end{minted}
+
+The \mintinline{c}{void* ntuple} is returned by \mintinline{c}{open_ntuple()}
+and needs to be passed to the other functions.
+It is a pointer to some implementation specific structure that represents
+the ntuple writer.
+
+\mintinline{c}{add_ntuple_branch_.*()} functions are used to pass pointers to
+variables that will contain the values of ntuple branches.
+The program using the interface needs to allocate these variables and overwrite
+them for every event.
+Once the values of all the variables are set, \mintinline{c}{fill_ntuple()}
+needs to be called to add the event comprised of these values to the ntuple.
+This is similar to how trees are written in \texttt{ROOT}.
+
+Once all the events have been written, \mintinline{c}{close_ntuple()} should be
+called to finish writing the ntuple file and to free the memory associated with
+the writer structure.
+
+For ntuple output in \texttt{ROOT} format, these functions are defined in the
+\texttt{root\_ntuples.cc} file, written in \texttt{C++}.
+This part cannot be written in \texttt{Fortran}, because \texttt{ROOT} does not
+provide \texttt{Fortran} bindings.
+Essentially, the reason for the particular structure of this patch is to allow
+this part to be written in an arbitrary language with arbitrary dependencies.
+The implementation is abstracted by encapsulating it in a shared library.
+In order to load the library and call the API functions from \texttt{Fortran},
+the interface file, \texttt{ntuple\_interface\_dl.c}, written in \texttt{C},
+needs to be compiled with \texttt{MCFM}.
+This part could probably be written in \texttt{Fortran}, but that would not
+add any tangible benefit, and it is easier to do in \texttt{C}.
+Finally, the \texttt{MCFM} specific \texttt{Fortran} interface is provided in
+the file \texttt{ntuple\_interface.f}, which is a drop-in replacement for
+\texttt{src/User/mcfm\_froot.f}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{How to apply the patch}
+
+Here are instructions on how to apply the patch to an existing \texttt{MCFM}
+source code.
+I use \texttt{MCFM-8.0} as the specific example, but the steps should be very
+similar for all relatively recent versions.
+
+\begin{enumerate}
+\item Get the patch from \url{https://github.com/ivankp/mcfm_ntuple_patch}.
+\begin{minted}{bash}
+  cd /path/to/mcfm
+  git clone https://github.com/ivankp/mcfm_ntuple_patch.git
+\end{minted}
+
+\item Compile the shared library.
+\begin{minted}{bash}
+  cd mcfm_ntuple_patch
+  make
+\end{minted}
+
+\item Link (or copy) files to \texttt{src/User/}.
+\begin{minted}{bash}
+  cd ../src/User
+  ln -s ../../ntuple/ntuple_interface_dl.c
+  ln -s ../../ntuple/ntuple_interface.f
+  cd ../..
+\end{minted}
+
+\item Edit the \texttt{MCFM} \texttt{makefile} to compile the added files.
+
+Change the definition of the \texttt{USERFILES} variable:
+\begin{minted}{make}
+  # Check NTUPLES flag
+  ifeq ($(NTUPLES),FROOT)
+    # USERFILES += mcfm_froot.o froot.co # <-- comment this line out
+    USERFILES += ntuple_interface_dl.o ntuple_interface.o # <-- add this line
+\end{minted}
+
+Add a rule for \texttt{.c} files:
+\begin{minted}{make}
+  %.o: %.c
+        gcc -Wall -O3 -c $< -o $(OBJNAME)/$@
+\end{minted}
+It can be placed near line 2376, below the comment
+\mintinline{make}{# for FROOT package}, but it doesn't really matter where.
+
+\item Add an extra clause in \texttt{src/Need/mcfm\_exit.f} near the end.
+\begin{minted}{fortran}
+        call NTfinalize
+    endif
+  else ! add this line
+    call NTfinalize ! add this line
+  endif
+\end{minted}
+
+\item \texttt{MCFM} can now be recompiled and run.
+\item
+  In order to run with the new ntuple output, a link to (or copy of)
+  the library compiled in step~2 needs to be present in the run directory,
+  and has to be called \texttt{ntuples.so}.
+\end{enumerate}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Outlook}
+
+If this patch is to be merged into a future release of \texttt{MCFM},
+a few things need to be changed or added to fully incorporate it.
+\begin{enumerate}
+  \item The ntuples shared library can be made to compile together with
+    \texttt{MCFM}, if \texttt{ROOT} is installed.
+
+  \item Right now, the path to the ntuples shared library is hardcoded in
+    \texttt{ntuple\_interface.f} to look for an \texttt{ntuples.so} file
+    in the current directory, i.e. the directory where \texttt{MCFM} is run.
+\begin{minted}{fortran}
+  call load_ntuple_lib("./ntuples.so"//C_NULL_CHAR)
+\end{minted}
+    The current approach can be retained for its flexibility.
+    But this requires a link to the library to be present in the run directory.
+    This should be documented.
+
+    Alternatively, the default path could be to some directory where
+    the shared library will be put after it is compiled.
+
+    An optional parameter can be added to the runcard to specify where to look
+    for the library in case the user wants to use a custom one.
+    This option can be added in either case.
+    The option should specify the path to the \texttt{.so} file rather then to
+    a directory, for greater flexibility.
+
+  \item The \texttt{Fortran} interface file, \texttt{ntuple\_interface.f},
+    can be cleaned up. I wrote it to imitate \texttt{src/User/mcfm\_froot.f},
+    including dummy subroutines. This may not be necessary in \texttt{MCFM-9}.
+\end{enumerate}
+
+\clearpage
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Source code listings}
+
+\subsection{\texttt{root\_ntuples.cc}}
+\inputminted[
+  fontsize=\footnotesize,baselinestretch=1,linenos,xleftmargin=\parindent
+]{c++}{../root_ntuples.cc}
+
+\subsection{\texttt{ntuple\_interface\_dl.c}}
+\inputminted[
+  fontsize=\footnotesize,baselinestretch=1,linenos,xleftmargin=\parindent
+]{c}{../ntuple_interface_dl.c}
+
+\subsection{\texttt{ntuple\_interface.f}}
+\inputminted[
+  fontsize=\footnotesize,baselinestretch=1,linenos,xleftmargin=\parindent
+]{fortran}{../ntuple_interface.f}
+
+% \printbibliography[title=References]
+\end{document}
+
